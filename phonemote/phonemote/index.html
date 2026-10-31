@@ -1,0 +1,129 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PhoneMote</title>
+<style>
+:root{--bg:#eef2f5;--ink:#1d2b36;--cy:#17a5d8}
+@media(prefers-color-scheme:dark){:root{--bg:#10171c;--ink:#e6eef3}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font:600 16px/1.4 "Trebuchet MS",system-ui,sans-serif}
+canvas{position:fixed;inset:0;width:100%;height:100%}
+#ov{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(6px)}
+#card{display:flex;gap:32px;align-items:center;padding:36px 44px;border-radius:36px;background:#fff;color:#1d2b36;box-shadow:0 20px 60px #0003;max-width:92vw}
+#qr{width:180px;height:180px}
+#code{font-size:64px;letter-spacing:.12em;margin:4px 0}
+small{opacity:.7;display:block;max-width:300px}
+button{font:inherit;border:0;border-radius:20px;padding:10px 20px;background:var(--cy);color:#fff;cursor:pointer}
+#add{position:fixed;right:16px;bottom:16px}
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="ov"><div id="card">
+  <div id="qr"></div>
+  <div><div>Open on your phone:</div><div id="code"></div>
+  <small id="url"></small><p id="pl">Waiting for a phone…</p><button id="done">Close</button></div>
+</div></div>
+<button id="add" style="display:none">+ Player</button>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const cv=$('c'),g=cv.getContext('2d');let W,H;
+const fit=()=>{W=cv.width=innerWidth;H=cv.height=innerHeight};fit();addEventListener('resize',fit);
+const COL=['#ff4d6d','#2f9bff','#2fbf71','#f5a623'], FONT='"Trebuchet MS",system-ui,sans-serif';
+const room=Math.random().toString(36).slice(2,6).toUpperCase();
+const padURL=`${location.origin}/pad.html?r=${room}`;
+$('code').textContent=room;$('url').textContent=padURL;
+if(window.QRCode) new QRCode($('qr'),{text:padURL,width:180,height:180});
+
+/* ---------- signaling + WebRTC ---------- */
+const P={}; let polling=null, pollStop=0;
+const post=(box,msg)=>fetch('/api/signal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room,box,msg})});
+function startPoll(){ stopPoll(); pollStop=Date.now()+5*60e3;
+  polling=setInterval(async()=>{ if(Date.now()>pollStop) return stopPoll();
+    try{ const r=await(await fetch(`/api/signal?room=${room}&box=host`)).json(); for(const m of r.msgs||[]) await sig(m);}catch(e){} },1000); }
+function stopPoll(){clearInterval(polling);polling=null}
+async function sig(m){
+  const id=m.pid; let p=P[id];
+  if(m.t==='hello'){
+    if(p) p.pc.close();
+    const n=Object.keys(P).length; if(!p&&n>=4) return;
+    const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+    const col=p?p.col:COL[Object.keys(P).length%4];
+    p=P[id]={id,pc,col,x:.5,y:.5,tx:.5,ty:.5,a0:null,cal:0,k:{},pr:{},q:[],ready:0};
+    p.dc=pc.createDataChannel('c',{ordered:false});
+    pc.onicecandidate=e=>e.candidate&&post(id,{t:'ice',c:e.candidate});
+    p.dc.onopen=()=>{p.ready=1;list();setTimeout(()=>{if(Object.values(P).some(q=>q.ready)&&!polling)return;closeOv()},1200)};
+    p.dc.onmessage=e=>onMsg(p,JSON.parse(e.data));
+    pc.onconnectionstatechange=()=>{ if(['failed','closed','disconnected'].includes(pc.connectionState)){delete P[id];list()} };
+    await pc.setLocalDescription(await pc.createOffer());
+    post(id,{t:'offer',sdp:pc.localDescription});
+  } else if(p&&m.t==='answer'){
+    await p.pc.setRemoteDescription(m.sdp); p.q.forEach(c=>p.pc.addIceCandidate(c)); p.q=[];
+  } else if(p&&m.t==='ice'){ p.pc.remoteDescription ? p.pc.addIceCandidate(m.c) : p.q.push(m.c); }
+}
+const wrap=d=>((d+540)%360)-180;
+function onMsg(p,m){
+  if(m.t==='m'){
+    if(p.a0==null||p.cal){p.a0=m.a;p.b0=m.b;p.cal=0}
+    p.tx=.5-wrap(m.a-p.a0)/45; p.ty=.5-(m.b-p.b0)/30;      // yaw/pitch from phone orientation
+  } else if(m.t==='b'){
+    if(m.k==='C'){ if(m.d)p.cal=1; return }
+    p.k[m.k]=m.d; if(m.d){p.pr[m.k]=1; if(m.k==='H') go('menu');}
+  }
+}
+const rumble=p=>p&&p.ready&&p.dc.send('{"t":"r"}');
+function list(){ const a=Object.values(P).filter(p=>p.ready);
+  $('pl').innerHTML=a.length?a.map((p,i)=>`<span style="color:${p.col}">●</span> Player ${i+1} connected`).join('<br>'):'Waiting for a phone…';
+  $('add').style.display=a.length&&$('ov').style.display==='none'?'block':'none'; }
+function closeOv(){$('ov').style.display='none';stopPoll();list()}
+$('done').onclick=closeOv;
+$('add').onclick=()=>{$('ov').style.display='flex';$('add').style.display='none';startPoll()};
+startPoll();
+
+/* ---------- scenes ---------- */
+const rnd=(a,b)=>a+Math.random()*(b-a), players=()=>Object.values(P).filter(p=>p.ready);
+const rr=(x,y,w,h,r)=>{g.beginPath();g.roundRect(x,y,w,h,r)};
+const tiles=[{id:'blast',name:'Target Blast',sub:'Point and shoot. 30 seconds.'},{id:'pong',name:'Pong',sub:'Tilt up and down. 2 players or the CPU.'}];
+const tileBox=i=>({x:W/2-(tiles.length*300+(tiles.length-1)*30)/2+i*330,y:H*.38,w:300,h:220});
+const scenes={
+  menu:{update(){ for(const p of players()) if(p.pr.A) tiles.forEach((t,i)=>{const b=tileBox(i);
+      if(p.x*W>b.x&&p.x*W<b.x+b.w&&p.y*H>b.y&&p.y*H<b.y+b.h){rumble(p);go(t.id)}}) },
+    draw(){ g.fillStyle='#1d2b36';g.font=`700 64px ${FONT}`;g.textAlign='center';g.fillText('PhoneMote',W/2,H*.22);
+      g.font=`600 20px ${FONT}`;g.globalAlpha=.7;g.fillText(players().length?'Aim at a game and press A':'Connect a phone to start',W/2,H*.22+40);g.globalAlpha=1;
+      tiles.forEach((t,i)=>{const b=tileBox(i);const hot=players().some(p=>p.x*W>b.x&&p.x*W<b.x+b.w&&p.y*H>b.y&&p.y*H<b.y+b.h);
+        g.save();g.shadowColor='#0003';g.shadowBlur=hot?40:18;g.fillStyle='#fff';rr(b.x,b.y-(hot?8:0),b.w,b.h,28);g.fill();g.restore();
+        g.fillStyle='#1d2b36';g.textAlign='left';g.font=`700 30px ${FONT}`;g.fillText(t.name,b.x+24,b.y+(hot?-8:0)+110);
+        g.font=`600 16px ${FONT}`;g.globalAlpha=.65;g.fillText(t.sub,b.x+24,b.y+(hot?-8:0)+140);g.globalAlpha=1;}) }},
+  blast:{init(){this.t=[];this.time=30;this.sp=0;this.sc={}},
+    update(dt){ this.time-=dt; this.sp-=dt;
+      if(this.time>0&&this.sp<=0){this.t.push({x:rnd(.08,.92)*W,y:rnd(.18,.9)*H,life:2});this.sp=Math.max(.3,.7-(30-this.time)*.01)}
+      this.t.forEach(o=>o.life-=dt);this.t=this.t.filter(o=>o.life>0);
+      if(this.time>0) for(const p of players()) if(p.pr.A){const i=this.t.findIndex(o=>Math.hypot(o.x-p.x*W,o.y-p.y*H)<20+50*o.life/2);
+        if(i>=0){this.t.splice(i,1);this.sc[p.id]=(this.sc[p.id]||0)+1;rumble(p)}}
+      if(this.time<-8) go('menu') },
+    draw(){ g.textAlign='center';
+      this.t.forEach(o=>{const r=20+50*o.life/2;[1,.66,.33].forEach((k,j)=>{g.fillStyle=j%2?'#fff':'#17a5d8';g.beginPath();g.arc(o.x,o.y,r*k,0,7);g.fill()})});
+      g.fillStyle='#1d2b36';g.font=`700 40px ${FONT}`;g.fillText(this.time>0?Math.ceil(this.time):'Time!',W/2,60);
+      players().forEach((p,i)=>{g.fillStyle=p.col;g.textAlign='left';g.fillText(this.sc[p.id]||0,30,60+i*50)}) }},
+  pong:{init(){this.bx=W/2;this.by=H/2;this.vx=420;this.vy=rnd(-200,200);this.l=H/2;this.r=H/2;this.s=[0,0]},
+    update(dt){ const ps=players(); if(ps[0])this.l=ps[0].y*H;
+      this.r=ps[1]?ps[1].y*H:this.r+Math.sign(this.by-this.r)*Math.min(Math.abs(this.by-this.r),300*dt);
+      this.bx+=this.vx*dt;this.by+=this.vy*dt;
+      if(this.by<10||this.by>H-10)this.vy*=-1;
+      if(this.vx<0&&this.bx<58&&Math.abs(this.by-this.l)<70){this.vx*=-1.06;this.vy+=(this.by-this.l)*4;rumble(ps[0])}
+      if(this.vx>0&&this.bx>W-58&&Math.abs(this.by-this.r)<70){this.vx*=-1.06;this.vy+=(this.by-this.r)*4;rumble(ps[1])}
+      if(this.bx<0||this.bx>W){this.s[this.bx<0?1:0]++;this.bx=W/2;this.by=H/2;this.vx=(this.bx<0?-1:1)*420;this.vy=rnd(-200,200)} },
+    draw(){ g.fillStyle='#1d2b36';rr(30,this.l-60,16,120,8);g.fill();rr(W-46,this.r-60,16,120,8);g.fill();
+      g.fillStyle='#17a5d8';g.beginPath();g.arc(this.bx,this.by,11,0,7);g.fill();
+      g.fillStyle='#1d2b36';g.font=`700 56px ${FONT}`;g.textAlign='center';g.fillText(this.s[0],W/2-60,80);g.fillText(this.s[1],W/2+60,80);
+      g.font=`600 16px ${FONT}`;g.globalAlpha=.6;g.fillText('Home on the phone returns to the menu',W/2,H-24);g.globalAlpha=1 }}
+};
+let scene=scenes.menu; function go(id){scene=scenes[id];scene.init&&scene.init()}
+
+/* ---------- loop ---------- */
+let last=performance.now();
+(function loop(now){ const dt=Math.min(.05,(now-last)/1000);last=now;
+  g.clearRect(0,0,W,H);
+  for(const p of players()){p.x+=(Math.min(1,Math.max(0,p.tx))-p.x)*.35;p.y+=(Math.min(1,Math.max(0,p.ty))-p.y)*.35}
+  scene.update(dt);scene.draw();
+  for(const p of players()){ g.fillStyle=p.col;g.strokeStyle='#fff';g.lineWidth=3;g.beginPath();g.arc(p.x*W,p.y*H,12,0,7);g.fill();g.stroke(); p.pr={} }
+  requestAnimationFrame(loop)})(last);
+</script></body></html>

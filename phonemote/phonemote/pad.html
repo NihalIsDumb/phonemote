@@ -1,0 +1,68 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>PhoneMote controller</title>
+<style>
+:root{--bg:#e9eef2;--ink:#1d2b36;--cy:#17a5d8}
+@media(prefers-color-scheme:dark){:root{--bg:#10171c;--ink:#e6eef3}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;touch-action:none}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:600 16px/1.3 "Trebuchet MS",system-ui,sans-serif}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom)}
+#pad{display:none;flex-direction:column;align-items:center;gap:22px;width:100%}
+.row{display:flex;gap:18px;align-items:center}
+button{font:inherit;color:inherit;border:0;cursor:pointer}
+.a{width:120px;height:120px;border-radius:50%;background:var(--cy);color:#fff;font-size:42px;box-shadow:0 8px 0 #0e7ba3}
+.a:active{transform:translateY(6px);box-shadow:0 2px 0 #0e7ba3}
+.b{width:150px;height:64px;border-radius:32px;background:#fff;color:#1d2b36;box-shadow:0 5px 0 #b9c4cc}
+.b:active{transform:translateY(4px);box-shadow:0 1px 0 #b9c4cc}
+.s{padding:12px 20px;border-radius:20px;background:transparent;border:2px solid currentColor;opacity:.75}
+#go{padding:18px 34px;border-radius:30px;background:var(--cy);color:#fff;font-size:20px}
+h1{margin:0;font-size:26px}
+</style></head><body>
+<h1>PhoneMote</h1>
+<p id="st">Point the phone at the screen like a TV remote.</p>
+<button id="go">Connect</button>
+<div id="pad">
+  <div class="row"><button class="b" data-k="B">B</button><button class="a" data-k="A">A</button></div>
+  <div class="row"><button class="s" data-k="C">Re-center</button><button class="s" data-k="H">Home</button></div>
+</div>
+<script>
+const $=id=>document.getElementById(id), st=$('st');
+const room=new URLSearchParams(location.search).get('r')||'';
+const pid=Math.random().toString(36).slice(2,8);
+let pc,dc,pend=[],timer;
+const post=msg=>fetch('/api/signal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room,box:'host',msg:{pid,...msg}})});
+const send=o=>dc&&dc.readyState==='open'&&dc.send(JSON.stringify(o));
+
+$('go').onclick=async()=>{
+  if(!room) return st.textContent='No room code. Scan the QR on the PC screen.';
+  try{ if(DeviceOrientationEvent.requestPermission && await DeviceOrientationEvent.requestPermission()!=='granted') return st.textContent='Motion access denied. Allow it in Safari settings.'; }catch(e){}
+  addEventListener('deviceorientation',e=>{ if(e.alpha!=null) send({t:'m',a:e.alpha,b:e.beta,g:e.gamma}); });
+  try{ navigator.wakeLock.request('screen'); }catch(e){}
+  $('go').style.display='none'; st.textContent='Connecting…';
+  post({t:'hello'}); timer=setInterval(poll,700);
+};
+async function poll(){
+  const r=await(await fetch(`/api/signal?room=${room}&box=${pid}`)).json();
+  for(const m of r.msgs||[]) await sig(m);
+}
+async function sig(m){
+  if(m.t==='offer'){
+    pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+    pc.onicecandidate=e=>e.candidate&&post({t:'ice',c:e.candidate});
+    pc.ondatachannel=e=>{
+      dc=e.channel;
+      dc.onopen=()=>{clearInterval(timer);$('pad').style.display='flex';st.textContent='Connected. Aim and press A.';};
+      dc.onclose=()=>{$('pad').style.display='none';st.textContent='Disconnected. Reload to reconnect.';};
+      dc.onmessage=e=>{ if(JSON.parse(e.data).t==='r') navigator.vibrate&&navigator.vibrate(40); };
+    };
+    await pc.setRemoteDescription(m.sdp);
+    for(const c of pend) pc.addIceCandidate(c); pend=[];
+    await pc.setLocalDescription(await pc.createAnswer());
+    post({t:'answer',sdp:pc.localDescription});
+  } else if(m.t==='ice'){ pc&&pc.remoteDescription ? pc.addIceCandidate(m.c) : pend.push(m.c); }
+}
+document.querySelectorAll('[data-k]').forEach(b=>{
+  b.onpointerdown=e=>{e.preventDefault();send({t:'b',k:b.dataset.k,d:1});navigator.vibrate&&navigator.vibrate(8);};
+  b.onpointerup=b.onpointercancel=b.onpointerleave=()=>send({t:'b',k:b.dataset.k,d:0});
+});
+</script></body></html>
